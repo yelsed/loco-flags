@@ -1,8 +1,22 @@
 # loco-flags, version 1
 
-> **Status:** approved 14 September 2026. Not yet built.
-> **Blocked by:** Fuyf's upgrade from loco 0.16.4 to 1.1.0, because this crate targets
-> loco 1.1 and sea-orm 2.0 and Fuyf is its first consumer.
+> **Status:** built on 15 September 2026, against loco 1.1.0 and sea-orm 2.0.3. The block is
+> gone: Fuyf made the jump on `the-framework-catches-up`.
+>
+> **Where the built crate differs from this document**, all of it additive and none of it a
+> change of mind:
+>
+> - `Flags::load_on` and `Flags::load_global_on` take a connection rather than an `AppContext`,
+>   for a worker, a task, or a test with no application around it. The context-shaped calls
+>   delegate to them.
+> - `try_active` returns a `Result`, so `RolloutWithoutScope` and `UnknownFlag` are reachable and
+>   not only loggable. `active` is unchanged and still returns `bool`.
+> - `Subject` names a subject directly, for a task or a test with no type to hang `FlagScope` on.
+> - `store` holds every write in one place, so a later admin screen sits on the same functions the
+>   tasks do.
+> - The migration is named by hand rather than by `DeriveMigrationName`, which takes its name from
+>   the module path and would have written this crate's path into a consumer's migration history.
+> - `flag:override … value:clear` removes a decision, which the task list below did not have.
 
 ## Why this exists
 
