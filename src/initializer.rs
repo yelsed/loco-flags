@@ -11,9 +11,9 @@
 //! `doctor` says so before an incident does.
 
 use loco_rs::{
+    Result,
     app::{AppContext, Initializer as LocoInitializer},
     doctor::{Check, CheckStatus},
-    Result,
 };
 use sea_orm::EntityTrait;
 

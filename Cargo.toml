@@ -19,9 +19,12 @@ categories = ["web-programming", "config", "database"]
 # `auth`, the caches and the workers are all left off here and arrive through their own dependency.
 loco-rs = { version = "1.1", default-features = false, features = ["with-db"] }
 
-# Only the derive macros. Every driver and runtime feature is the consumer's choice and arrives
-# through their own loco-rs, because cargo unions features across the graph. A library that picks
-# `sqlx-postgres` for you is a library that has decided which database you run.
+# Only the derive macros are asked for here. That is not the same as leaving the driver to the
+# consumer: enabling loco's `with-db` above pulls in loco's own sea-orm, which already names
+# `sqlx-postgres`, `sqlx-sqlite` and `runtime-tokio-rustls`, and cargo unions features across the
+# graph. So the drivers arrive either way. Naming none of them here keeps this manifest honest
+# about what it is choosing, which is nothing, and means the day loco changes its mind this crate
+# does not have to be edited.
 sea-orm = { version = "2.0", default-features = false, features = ["macros"] }
 sea-orm-migration = { version = "2.0", default-features = false }
 
@@ -35,6 +38,10 @@ tracing = "0.1"
 
 [dev-dependencies]
 async-trait = "0.1"
+# `testing` is what exposes `tests_cfg`, which is the only way to build an `AppContext` from
+# outside loco: it is `#[non_exhaustive]`, so a struct literal will not do. The tests take the one
+# it hands out and swap its dummy connection for a real one.
+loco-rs = { version = "1.1", default-features = false, features = ["with-db", "testing"] }
 # The integration tests own a connection and a migrator directly, with no application around them,
 # so they need the driver and runtime a consumer's loco would otherwise be supplying.
 sea-orm = { version = "2.0", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros"] }

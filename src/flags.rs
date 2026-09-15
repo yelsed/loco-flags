@@ -13,10 +13,12 @@ use crate::{
 };
 
 /// What the `feature_flags` row said, with the columns that decide anything.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Definition {
     enabled: bool,
     rollout_percent: Option<u8>,
+    /// Whose audience the rollout draws from, or `None` for the flag's own name.
+    bucket_group: Option<String>,
 }
 
 /// Every flag, already resolved as far as it can be without being asked.
@@ -61,8 +63,24 @@ impl Flags {
     /// # Errors
     /// When the database will not answer.
     pub async fn load_on(db: &impl ConnectionTrait, scope: impl FlagScope) -> Result<Self> {
-        let scope_type = scope.scope_type().to_owned();
-        let scope_id = scope.scope_id();
+        Self::load_for(db, scope.scope_type(), &scope.scope_id()).await
+    }
+
+    /// [`Flags::load_on`], for a subject whose kind is only known at runtime.
+    ///
+    /// [`FlagScope`] returns a `&'static str` because every real implementor writes a literal. A
+    /// task parsing `host:42` off a command line has no literal to return, and this is the way in
+    /// that does not ask it to invent one by leaking a string.
+    ///
+    /// # Errors
+    /// When the database will not answer.
+    pub async fn load_for(
+        db: &impl ConnectionTrait,
+        scope_type: &str,
+        scope_id: &str,
+    ) -> Result<Self> {
+        let scope_type = scope_type.to_owned();
+        let scope_id = scope_id.to_owned();
 
         let definitions = read_definitions(db).await?;
 
@@ -147,6 +165,48 @@ impl Flags {
         self.resolve(key)
     }
 
+    /// A `Flags` with fixed answers, for testing code that reads flags.
+    ///
+    /// **Here because this crate's own shape would otherwise be contagious.** Every other way to
+    /// get a `Flags` needs a database, so without this, an application that puts one branch behind
+    /// a flag has just made every test of that branch need Postgres. That is a real cost to impose
+    /// on a consumer, and the fix is four lines.
+    ///
+    /// Everything named is on and everything else is unknown, so it answers `false` and logs the
+    /// same warning a real miss would. Scoped, so a flag on a percentage rollout resolves rather
+    /// than reporting [`FlagError::RolloutWithoutScope`] - though a fixed `Flags` never reaches the
+    /// rollout step, because a named flag is on outright.
+    ///
+    /// ```ignore
+    /// let flags = Flags::fixed(["occasions"]);
+    /// assert!(flags.active("occasions"));
+    /// assert!(!flags.active("paywall"));
+    /// ```
+    #[must_use]
+    pub fn fixed<I, S>(on: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            scope: Some(("test".to_owned(), "test".to_owned())),
+            definitions: on
+                .into_iter()
+                .map(|key| {
+                    (
+                        key.into(),
+                        Definition {
+                            enabled: true,
+                            rollout_percent: None,
+                            bucket_group: None,
+                        },
+                    )
+                })
+                .collect(),
+            overrides: HashMap::new(),
+        }
+    }
+
     /// Whether this flag has a row at all, however it is set.
     #[must_use]
     pub fn is_known(&self, key: &str) -> bool {
@@ -185,30 +245,47 @@ impl Flags {
             return Err(FlagError::RolloutWithoutScope(key.to_owned()));
         };
 
-        Ok(bucket::is_inside(key, scope_type, scope_id, percent))
+        // **The audience is the group's, or the flag's own name.** Two flags without a group reach
+        // different people on purpose: without that, the unluckiest tenth of your users would meet
+        // every experiment you ever run. Naming a group is how you deliberately undo it, so three
+        // switches on one feature can be killed one at a time while reaching one audience.
+        let audience = definition.bucket_group.as_deref().unwrap_or(key);
+
+        Ok(bucket::is_inside(audience, scope_type, scope_id, percent))
     }
 }
 
 /// Every flag row, keyed by name.
 ///
-/// A `rollout_percent` outside nought to a hundred cannot be written by this crate's tasks, but the
-/// column is an ordinary `smallint` and somebody with `psql` is not stopped by us. Clamping is
-/// deliberate over refusing: a nonsense number in one row should not take out a request that was
-/// asking about a different flag entirely.
+/// **An impossible percentage fails closed.** The column carries a `CHECK` between nought and a
+/// hundred, so this is unreachable through any supported path, and it is handled anyway because the
+/// one way it could arrive, somebody editing the row by hand on an older schema, is also the way it
+/// would do the most damage: clamping upward turned a stray `1000` into "release it to everybody",
+/// which is the only place in the crate where corruption read as an instruction. A value the crate
+/// could not have written is treated as no rollout at all, and said out loud.
 async fn read_definitions(db: &impl ConnectionTrait) -> Result<HashMap<String, Definition>> {
     Ok(feature_flags::Entity::find()
         .all(db)
         .await?
         .into_iter()
         .map(|row| {
-            let rollout_percent = row.rollout_percent.map(|percent| {
-                u8::try_from(percent.clamp(0, 100)).expect("clamped to 0..=100, which fits a u8")
+            let rollout_percent = row.rollout_percent.and_then(|percent| {
+                u8::try_from(percent).ok().filter(|percent| *percent <= 100).or_else(|| {
+                    tracing::error!(
+                        flag = %row.key,
+                        rollout_percent = percent,
+                        "a rollout percentage outside 0..=100 is not a percentage, so this flag is \
+                         being treated as having no rollout at all"
+                    );
+                    None
+                })
             });
             (
                 row.key,
                 Definition {
                     enabled: row.enabled,
                     rollout_percent,
+                    bucket_group: row.bucket_group,
                 },
             )
         })
@@ -225,6 +302,16 @@ mod tests {
         definitions: &[(&str, bool, Option<u8>)],
         overrides: &[(&str, bool)],
     ) -> Flags {
+        grouped(scope, definitions, overrides, None)
+    }
+
+    /// The same, with every flag drawing from one named audience.
+    fn grouped(
+        scope: Option<(&str, &str)>,
+        definitions: &[(&str, bool, Option<u8>)],
+        overrides: &[(&str, bool)],
+        bucket_group: Option<&str>,
+    ) -> Flags {
         Flags {
             scope: scope.map(|(kind, id)| (kind.to_owned(), id.to_owned())),
             definitions: definitions
@@ -235,6 +322,7 @@ mod tests {
                         Definition {
                             enabled: *enabled,
                             rollout_percent: *rollout_percent,
+                            bucket_group: bucket_group.map(ToOwned::to_owned),
                         },
                     )
                 })
@@ -326,6 +414,66 @@ mod tests {
     fn a_global_flag_answers_a_scoped_load_the_same_way() {
         let flags = flags(Some(("host", "42")), &[("paywall", true, None)], &[]);
         assert!(flags.active("paywall"));
+    }
+
+    /// Two flags at one percentage, in one group, must reach exactly the same people: that is the
+    /// whole point of a group, and it is what lets three switches on one feature be killed
+    /// separately while the audience stays put.
+    #[test]
+    fn flags_in_one_group_reach_the_same_people() {
+        for subject in 0..500 {
+            let id = subject.to_string();
+            let scope = Some(("host", id.as_str()));
+
+            let first = grouped(
+                scope,
+                &[("checkout_button", true, Some(30))],
+                &[],
+                Some("checkout"),
+            );
+            let second = grouped(
+                scope,
+                &[("checkout_summary", true, Some(30))],
+                &[],
+                Some("checkout"),
+            );
+
+            assert_eq!(
+                first.active("checkout_button"),
+                second.active("checkout_summary"),
+                "host {id} was in one half of the checkout and not the other"
+            );
+        }
+    }
+
+    /// And without a group they must not, or one unlucky tenth meets every experiment.
+    #[test]
+    fn flags_without_a_group_reach_different_people() {
+        let answers: Vec<(bool, bool)> = (0..500)
+            .map(|subject| {
+                let id = subject.to_string();
+                let scope = Some(("host", id.as_str()));
+                (
+                    flags(scope, &[("checkout_button", true, Some(30))], &[])
+                        .active("checkout_button"),
+                    flags(scope, &[("checkout_summary", true, Some(30))], &[])
+                        .active("checkout_summary"),
+                )
+            })
+            .collect();
+
+        assert!(
+            answers.iter().any(|(first, second)| first != second),
+            "two ungrouped flags picked exactly the same audience"
+        );
+    }
+
+    #[test]
+    fn a_fixed_flags_answers_without_a_database() {
+        let flags = Flags::fixed(["occasions", "paywall"]);
+        assert!(flags.active("occasions"));
+        assert!(flags.active("paywall"));
+        assert!(!flags.active("something-else"));
     }
 
     #[test]

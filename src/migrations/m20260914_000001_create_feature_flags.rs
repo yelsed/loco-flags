@@ -11,7 +11,10 @@
 // crate turns on everywhere else, so the exception is named here rather than switched off globally.
 #![allow(elided_lifetimes_in_paths)]
 
-use sea_orm_migration::{prelude::*, schema::*};
+use sea_orm_migration::{
+    prelude::*,
+    schema::{boolean, pk_auto, small_integer_null, text, text_null, timestamp_with_time_zone},
+};
 
 #[derive(DeriveIden)]
 enum FeatureFlags {
@@ -19,6 +22,7 @@ enum FeatureFlags {
     Key,
     Enabled,
     RolloutPercent,
+    BucketGroup,
     Description,
     CreatedAt,
     UpdatedAt,
@@ -48,11 +52,26 @@ impl MigrationName for Migration {
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // **Refuse rather than adopt.** `feature_flags` is the most obvious name a consumer's own
+        // hand-rolled flags table already has, and an application with one is exactly the
+        // application that reaches for this crate. With `if_not_exists` the collision passed
+        // silently: the migration skipped the table, created everything around it, recorded itself
+        // as applied, and then every request failed on `column feature_flags.enabled does not
+        // exist` with nothing pointing back at the cause. Saying so at migrate time is the only
+        // moment the consumer can still act.
+        for table in ["feature_flags", "feature_flag_overrides"] {
+            if manager.has_table(table).await? {
+                return Err(DbErr::Custom(format!(
+                    "loco-flags needs a table named `{table}` and this database already has one. \
+                     Rename yours, or leave loco-flags out of the migrator."
+                )));
+            }
+        }
+
         manager
             .create_table(
                 Table::create()
                     .table(FeatureFlags::Table)
-                    .if_not_exists()
                     // The name is the identity. A surrogate id would be a second thing that could
                     // disagree with it, and nothing would ever join on it.
                     .col(text(FeatureFlags::Key).primary_key())
@@ -62,6 +81,23 @@ impl MigrationTrait for Migration {
                     // Null means "not a rollout at all", which is a different thing from nought
                     // percent. Nought is a prepared flag reaching nobody yet.
                     .col(small_integer_null(FeatureFlags::RolloutPercent))
+                    // **Held here rather than trusted from above.** Every other failure in this
+                    // crate fails closed, but a stored 1000 would clamp to 100 on the way out and
+                    // release the feature to everybody: the one direction where corruption is
+                    // indistinguishable from "launch it". A fat-fingered percentage, or a column
+                    // carried over from a per-mille system, is refused by the database instead.
+                    .check(
+                        Expr::col(FeatureFlags::RolloutPercent)
+                            .gte(0)
+                            .and(Expr::col(FeatureFlags::RolloutPercent).lte(100)),
+                    )
+                    // **Which audience this flag's rollout draws from.** Null means "my own
+                    // name", which is what keeps two unrelated flags at ten percent from choosing
+                    // the same unlucky tenth of your users. Naming a group is how you deliberately
+                    // undo that: several flags in one group roll out to exactly the same people,
+                    // so three switches on one feature can be killed separately while reaching one
+                    // audience together.
+                    .col(text_null(FeatureFlags::BucketGroup))
                     .col(text_null(FeatureFlags::Description))
                     .col(
                         timestamp_with_time_zone(FeatureFlags::CreatedAt)
@@ -79,7 +115,6 @@ impl MigrationTrait for Migration {
             .create_table(
                 Table::create()
                     .table(FeatureFlagOverrides::Table)
-                    .if_not_exists()
                     .col(pk_auto(FeatureFlagOverrides::Id))
                     .col(text(FeatureFlagOverrides::FlagKey))
                     .col(text(FeatureFlagOverrides::ScopeType))
@@ -108,13 +143,17 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
+        // Index names live in Postgres's schema-wide relation namespace, beside every table and
+        // sequence, so both of these carry their table's name. `overrides_by_subject` is a name any
+        // application might already have used on a table of its own.
+        //
         // **One decision per subject per flag, held by the database.** Two operators answering the
         // same question at once is exactly the read-then-write that a check in the task layer
         // loses, and the loser would leave two contradictory rows with nothing to say which wins.
         manager
             .create_index(
                 Index::create()
-                    .name("one_override_per_scope_per_flag")
+                    .name("feature_flag_overrides_one_per_scope_per_flag")
                     .table(FeatureFlagOverrides::Table)
                     .col(FeatureFlagOverrides::FlagKey)
                     .col(FeatureFlagOverrides::ScopeType)
@@ -128,7 +167,7 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
-                    .name("overrides_by_subject")
+                    .name("feature_flag_overrides_by_subject")
                     .table(FeatureFlagOverrides::Table)
                     .col(FeatureFlagOverrides::ScopeType)
                     .col(FeatureFlagOverrides::ScopeId)
@@ -149,7 +188,12 @@ impl MigrationTrait for Migration {
             )
             .await?;
         manager
-            .drop_table(Table::drop().table(FeatureFlags::Table).if_exists().to_owned())
+            .drop_table(
+                Table::drop()
+                    .table(FeatureFlags::Table)
+                    .if_exists()
+                    .to_owned(),
+            )
             .await?;
         Ok(())
     }

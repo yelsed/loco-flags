@@ -17,9 +17,24 @@ use sha2::{Digest, Sha256};
 /// The flag's key is part of the digest so that two flags at ten percent do not pick the same ten
 /// percent of people. Without it, the unluckiest tenth of your users would meet every experiment
 /// you ever run.
+/// **Each part is length-prefixed rather than joined with a separator.** Joining with `:` made the
+/// input ambiguous: `("occasions", "host", "7:9")` and `("occasions", "host:7", "9")` both produce
+/// `occasions:host:7:9`, so two different subjects shared a bucket. Unreachable in practice, since
+/// a `scope_type` is written in code and no application puts a colon in one, but the cost of being
+/// wrong here is unrepairable: changing how this is computed reshuffles every rollout in every
+/// deployment that already uses the crate, which is the exact hazard the note above describes.
+///
+/// # Panics
+/// It cannot. A sha256 digest is always thirty-two bytes, so its first eight are always there; the
+/// `expect` is the compiler asking for a proof that the slice has a fixed length.
 #[must_use]
 pub fn of(key: &str, scope_type: &str, scope_id: &str) -> u8 {
-    let digest = Sha256::digest(format!("{key}:{scope_type}:{scope_id}").as_bytes());
+    let mut hasher = Sha256::new();
+    for part in [key, scope_type, scope_id] {
+        hasher.update(u64::try_from(part.len()).unwrap_or(u64::MAX).to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
+    let digest = hasher.finalize();
     let leading: [u8; 8] = digest[..8]
         .try_into()
         .expect("a sha256 digest is 32 bytes, so its first 8 are always there");
@@ -105,8 +120,17 @@ mod tests {
         }
     }
 
-    /// The digest is over the three parts joined, so the same identifier under a different scope
-    /// type is a different subject.
+    /// The same identifier under a different scope type is a different subject.
+    /// The thing the length prefix exists for: no two distinct triples share an encoding.
+    #[test]
+    fn two_subjects_cannot_be_confused_by_moving_a_colon() {
+        assert_ne!(
+            of("occasions", "host", "7:9"),
+            of("occasions", "host:7", "9"),
+            "a separator that can appear inside a part makes two subjects into one"
+        );
+    }
+
     #[test]
     fn a_scope_type_is_part_of_who_you_are() {
         let as_host = of("occasions", "host", "42");
@@ -118,8 +142,8 @@ mod tests {
     /// so it must be impossible to do by accident.
     #[test]
     fn the_bucket_is_a_fixed_number_for_ever() {
-        assert_eq!(of("occasions", "host", "42"), 38);
-        assert_eq!(of("paywall", "host", "1"), 94);
-        assert_eq!(of("", "", ""), 59);
+        assert_eq!(of("occasions", "host", "42"), 46);
+        assert_eq!(of("paywall", "host", "1"), 20);
+        assert_eq!(of("", "", ""), 38);
     }
 }

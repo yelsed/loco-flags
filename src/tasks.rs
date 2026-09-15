@@ -6,6 +6,7 @@
 //! cargo loco task flag:on key:paywall
 //! cargo loco task flag:off key:paywall
 //! cargo loco task flag:rollout key:occasions pct:10
+//! cargo loco task flag:group key:checkout_button group:checkout
 //! cargo loco task flag:override key:occasions scope:host:42 value:on
 //! cargo loco task flag:delete key:occasions
 //! ```
@@ -15,12 +16,12 @@
 //! on [`crate::store`], which is the same place these sit.
 
 use loco_rs::{
+    Error, Result,
     app::AppContext,
     task::{Task, TaskInfo, Tasks, Vars},
-    Error, Result,
 };
 
-use crate::{scope::Subject, store};
+use crate::store;
 
 /// Add every flag task to an application's registry.
 ///
@@ -35,6 +36,7 @@ pub fn register(tasks: &mut Tasks) {
     tasks.register(On);
     tasks.register(Off);
     tasks.register(Rollout);
+    tasks.register(Group);
     tasks.register(Override);
     tasks.register(Delete);
 }
@@ -45,11 +47,16 @@ fn required<'vars>(vars: &'vars Vars, name: &str) -> Result<&'vars str> {
         .map_err(|_| Error::Message(format!("this task needs `{name}:…`")))
 }
 
-/// `host:42` into a subject.
+/// `host:42` into a kind and an identifier.
 ///
 /// Split on the **first** colon, so an identifier may contain one: a slug, a uuid with a prefix, or
 /// a tenant name are all likelier than not to.
-fn subject(argument: &str) -> Result<Subject> {
+///
+/// Returns the two halves rather than a [`Subject`], because [`crate::FlagScope`] returns a
+/// `&'static str` and a kind read off a command line is not static. The `_for` functions in
+/// [`crate::store`] take the pair directly, which is why nothing here has to leak a string to
+/// satisfy a lifetime.
+fn subject(argument: &str) -> Result<(String, String)> {
     let (kind, id) = argument.split_once(':').ok_or_else(|| {
         Error::Message(format!(
             "a scope looks like `host:42`, and `{argument}` has no colon in it"
@@ -62,13 +69,7 @@ fn subject(argument: &str) -> Result<Subject> {
         )));
     }
 
-    // Leaked so the kind can be the `&'static str` the trait asks for. One leak per task run, in a
-    // process that exits immediately afterwards; the alternative is making the trait own a String
-    // for the benefit of every application, to suit one caller here.
-    Ok(Subject::new(
-        Box::leak(kind.to_owned().into_boxed_str()),
-        id,
-    ))
+    Ok((kind.to_owned(), id.to_owned()))
 }
 
 /// `on`, `off`, `true`, `false`, `yes`, `no`, `1`, `0`.
@@ -109,6 +110,10 @@ impl Task for List {
                 (true, Some(percent)) => format!("on, rolling out to {percent}%"),
             };
             println!("{:<28} {state}", flag.key);
+
+            if let Some(group) = &flag.bucket_group {
+                println!("{:<28}   rolling out to the `{group}` audience", "");
+            }
 
             if let Some(description) = &flag.description {
                 println!("{:<28}   {description}", "");
@@ -201,7 +206,7 @@ impl Task for Rollout {
     fn task(&self) -> TaskInfo {
         TaskInfo {
             name: "flag:rollout".to_string(),
-            detail: "Give a flag a percentage and switch it on: key:… pct:10".to_string(),
+            detail: "Give a flag a percentage and switch it on: key:… pct:10|clear".to_string(),
         }
     }
 
@@ -209,18 +214,66 @@ impl Task for Rollout {
         let key = required(vars, "key")?;
         let raw = required(vars, "pct")?;
 
+        // **The way back off a rollout.** Without this a percentage was a one-way door: `flag:on`
+        // keeps it, `flag:off` answers false without removing it, and only `flag:delete` cleared it
+        // by deleting the flag and cascading away every exception anybody had written. Any code
+        // reading that flag through `load_global` would have answered false for ever in the
+        // meantime, because a rollout with no subject has no honest answer.
+        if raw.eq_ignore_ascii_case("clear") {
+            store::clear_rollout(&ctx.db, key).await?;
+            println!("`{key}` is no longer a rollout. Being switched on is now the whole answer.");
+            return Ok(());
+        }
+
         let percent: u8 = raw
             .parse()
             .ok()
             .filter(|percent| *percent <= 100)
             .ok_or_else(|| {
-                Error::Message(format!("`{raw}` is not a percentage between 0 and 100"))
+                Error::Message(format!(
+                    "`{raw}` is not a percentage between 0 and 100, and not `clear`"
+                ))
             })?;
 
         store::set_rollout(&ctx.db, key, percent).await?;
         println!(
             "`{key}` is on and reaching {percent}% of subjects. Raising this number never takes \
              the feature away from anybody who already had it."
+        );
+        Ok(())
+    }
+}
+
+/// Draw this flag's rollout from a named audience.
+pub struct Group;
+
+#[async_trait::async_trait]
+impl Task for Group {
+    fn task(&self) -> TaskInfo {
+        TaskInfo {
+            name: "flag:group".to_string(),
+            detail: "Share one rollout audience between flags: key:… group:checkout|clear"
+                .to_string(),
+        }
+    }
+
+    async fn run(&self, ctx: &AppContext, vars: &Vars) -> Result<()> {
+        let key = required(vars, "key")?;
+        let group = required(vars, "group")?;
+
+        if group.eq_ignore_ascii_case("clear") {
+            store::set_bucket_group(&ctx.db, key, None).await?;
+            println!(
+                "`{key}` draws from its own name again. Anyone inside its rollout may have \
+                 changed, because the audience is what decides."
+            );
+            return Ok(());
+        }
+
+        store::set_bucket_group(&ctx.db, key, Some(group)).await?;
+        println!(
+            "`{key}` now draws from the `{group}` audience. Every flag in that group at the same \
+             percentage reaches exactly the same people, and each keeps its own switch."
         );
         Ok(())
     }
@@ -240,11 +293,11 @@ impl Task for Override {
 
     async fn run(&self, ctx: &AppContext, vars: &Vars) -> Result<()> {
         let key = required(vars, "key")?;
-        let who = subject(required(vars, "scope")?)?;
+        let (kind, id) = subject(required(vars, "scope")?)?;
         let value = required(vars, "value")?;
 
         if value.eq_ignore_ascii_case("clear") {
-            let removed = store::clear_override(&ctx.db, key, &who).await?;
+            let removed = store::clear_override_for(&ctx.db, key, &kind, &id).await?;
             if removed == 0 {
                 println!("`{key}` had no exception for that subject; nothing changed.");
             } else {
@@ -254,7 +307,7 @@ impl Task for Override {
         }
 
         let enabled = onoff(value)?;
-        let decision = store::set_override(&ctx.db, key, &who, enabled).await?;
+        let decision = store::set_override_for(&ctx.db, key, &kind, &id, enabled).await?;
         println!(
             "`{key}` is forced {} for {}:{}, whatever the flag says.",
             if enabled { "on" } else { "off" },
@@ -291,17 +344,16 @@ impl Task for Delete {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scope::FlagScope;
 
     #[test]
     fn a_scope_splits_on_the_first_colon_so_an_identifier_may_contain_one() {
-        let who = subject("host:42").expect("a plain scope parses");
-        assert_eq!(who.scope_type(), "host");
-        assert_eq!(who.scope_id(), "42");
+        let (kind, id) = subject("host:42").expect("a plain scope parses");
+        assert_eq!(kind, "host");
+        assert_eq!(id, "42");
 
-        let uuid = subject("party:urn:uuid:1234").expect("an identifier may contain colons");
-        assert_eq!(uuid.scope_type(), "party");
-        assert_eq!(uuid.scope_id(), "urn:uuid:1234");
+        let (kind, id) = subject("party:urn:uuid:1234").expect("an identifier may contain colons");
+        assert_eq!(kind, "party");
+        assert_eq!(id, "urn:uuid:1234");
     }
 
     #[test]

@@ -21,6 +21,12 @@ pub trait FlagScope {
     /// **Changing it later moves every subject of that kind to a different place in every
     /// rollout**, and orphans every override row already written against the old spelling. Pick it
     /// once.
+    ///
+    /// **`&'static str`, because for every real implementor this is a literal.** `&str` was tried
+    /// and reverted: clippy's `unnecessary_literal_bound` fires on any implementation that returns
+    /// a literal, so the looser type moved friction out of this crate and into every consumer that
+    /// lints. A kind chosen at runtime does not go through this trait at all, and uses
+    /// [`crate::Flags::load_for`] and the `_for` functions in [`crate::store`] instead.
     fn scope_type(&self) -> &'static str;
 
     /// Which one it is, as text.

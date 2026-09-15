@@ -4,7 +4,12 @@
 ///
 /// Note what is **not** here: "the flag you asked about is off". That is an answer, not a failure,
 /// and it comes back as `false`.
+///
+/// **`#[non_exhaustive]` on purpose.** This crate keeps two hard problems for a later version, and
+/// both of them will want to report something new. Without this, adding one variant would be a
+/// breaking release for every consumer who wrote an exhaustive `match`.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum FlagError {
     /// A percentage rollout was asked about with nothing to roll out *to*.
     ///
@@ -25,6 +30,10 @@ pub enum FlagError {
     #[error("no flag is called `{0}`. `flag:list` shows the ones that exist")]
     UnknownFlag(String),
 
+    /// A number that cannot be a percentage was offered as one.
+    #[error("{0} is not a percentage: a rollout is a number between 0 and 100")]
+    NotAPercentage(u8),
+
     /// The database would not answer.
     #[error(transparent)]
     Db(#[from] sea_orm::DbErr),
@@ -35,10 +44,19 @@ pub type Result<T> = std::result::Result<T, FlagError>;
 
 impl From<FlagError> for loco_rs::Error {
     /// So a handler or a task can use `?` on us without writing a conversion.
+    ///
+    /// **Three kinds, three answers.** Everything used to land on `Message`, which loco renders as
+    /// a blank 500: a typed key and a percentage of 200 are things the caller got wrong, and
+    /// reporting them as server faults both misleads whoever reads the response and buries the real
+    /// 500s in whatever counts them.
     fn from(error: FlagError) -> Self {
         match error {
             FlagError::Db(inner) => Self::DB(inner),
-            other => Self::Message(other.to_string()),
+            // No catch-all. `#[non_exhaustive]` binds consumers, not this crate, so a variant
+            // added later has to be given an answer here rather than defaulting to a 500.
+            caller @ (FlagError::UnknownFlag(_)
+            | FlagError::RolloutWithoutScope(_)
+            | FlagError::NotAPercentage(_)) => Self::BadRequest(caller.to_string()),
         }
     }
 }

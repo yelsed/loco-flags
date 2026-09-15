@@ -17,6 +17,29 @@
 > - The migration is named by hand rather than by `DeriveMigrationName`, which takes its name from
 >   the module path and would have written this crate's path into a consumer's migration history.
 > - `flag:override … value:clear` removes a decision, which the task list below did not have.
+>
+> **And what the code review of 15 September 2026 changed**, after the crate was first built:
+>
+> - The digest length-prefixes its three parts instead of joining them with `:`, which was
+>   ambiguous: `("occasions", "host", "7:9")` and `("occasions", "host:7", "9")` shared a bucket.
+> - The migration refuses a database that already has a `feature_flags` table rather than adopting
+>   it, and therefore `down` can no longer drop a table it did not create.
+> - `rollout_percent` carries a `CHECK` between nought and a hundred, and an out-of-range value
+>   read from an older schema is treated as no rollout rather than clamped up to a hundred.
+> - `flag:rollout … pct:clear` exists, because a rollout used to be a one-way door.
+> - `FlagScope::scope_type` returns `&str`, so nothing has to leak to satisfy it.
+> - `FlagError` is `#[non_exhaustive]` and gained `NotAPercentage`.
+> - `set_override` runs in a transaction; `clear_override` checks the key like every other write.
+> - The two index names carry their table, because Postgres index names are schema-wide.
+>
+> **And one thing the owner asked for on 15 September**, after reading how the bucket works:
+>
+> - `feature_flags.bucket_group`, null by default. A rollout draws from the flag's own name unless
+>   a group is named, and then from the group. It exists for the case the original design had no
+>   answer for: one feature that is genuinely three switches, each wanting its own kill switch,
+>   all of which must reach the same people. Without it the only way to keep three switches in step
+>   was to make them one flag, which costs you the ability to kill them one at a time.
+> - `flag:group key:… group:checkout|clear` sets it, and `flag:list` shows it.
 
 ## Why this exists
 
@@ -80,7 +103,7 @@ which is not what anybody means by a rollout.
 ## The bucket
 
 ```
-bucket = first 8 bytes of sha256("{key}:{scope_type}:{scope_id}") as u64, modulo 100
+bucket = first 8 bytes of sha256(len+key, len+scope_type, len+scope_id) as u64, modulo 100
 ```
 
 Sha2 is already in loco's dependency tree, so this adds no dependency. It is used rather
@@ -126,6 +149,7 @@ cargo loco task flag:create key:paywall description:"kill switch for taking mone
 cargo loco task flag:on key:paywall
 cargo loco task flag:off key:paywall
 cargo loco task flag:rollout key:occasions pct:10
+cargo loco task flag:rollout key:occasions pct:clear
 cargo loco task flag:override key:occasions scope:host:42 value:on
 cargo loco task flag:delete key:occasions
 ```

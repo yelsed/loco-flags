@@ -25,6 +25,13 @@ pub struct Model {
     /// is a flag that has been prepared, is switched on, and is deliberately reaching nobody yet.
     pub rollout_percent: Option<i16>,
 
+    /// Whose audience this flag's rollout uses, or `None` for its own name.
+    ///
+    /// Two flags with the same group reach the same people at the same percentage. Two flags
+    /// without one reach different people, which is the default because it is what stops one
+    /// unlucky tenth of an audience meeting every experiment there is.
+    pub bucket_group: Option<String>,
+
     /// What this flag is for, in a sentence, for whoever finds it in `flag:list` in a year.
     pub description: Option<String>,
 

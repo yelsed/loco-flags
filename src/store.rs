@@ -6,7 +6,7 @@
 
 use sea_orm::{
     ActiveModelTrait, ActiveValue, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter,
-    QueryOrder,
+    QueryOrder, TransactionSession, TransactionTrait,
 };
 
 use crate::{
@@ -52,6 +52,7 @@ pub async fn create(
         key: ActiveValue::Set(key.to_owned()),
         enabled: ActiveValue::Set(false),
         rollout_percent: ActiveValue::NotSet,
+        bucket_group: ActiveValue::NotSet,
         description: ActiveValue::Set(description),
         created_at: ActiveValue::NotSet,
         updated_at: ActiveValue::NotSet,
@@ -83,18 +84,27 @@ pub async fn set_enabled(
 ///
 /// **Switching it on is part of this**, because a rollout on a flag whose kill switch is off
 /// reaches nobody, and setting a percentage is nobody's way of saying "still off". The reverse
-/// ordering, `flag:off` after `flag:rollout`, is available and means what it says.
+/// ordering, `flag:off` after `flag:rollout`, is available and means what it says. Note that this
+/// means a flag killed during an incident comes back on if somebody sets a percentage on it.
+///
+/// Anything above a hundred is **refused rather than clamped**. Clamping silently turned a
+/// mistyped `1000` into "release it to everybody", and it disagreed with the task, which refused
+/// the same number: two ways in, opposite answers, and the quiet one was the dangerous one.
 ///
 /// # Errors
-/// [`FlagError::UnknownFlag`] when no such key, or when the database will not answer.
+/// [`FlagError::UnknownFlag`] when no such key, [`FlagError::NotAPercentage`] above a hundred, or
+/// when the database will not answer.
 pub async fn set_rollout(
     db: &impl ConnectionTrait,
     key: &str,
     percent: u8,
 ) -> Result<feature_flags::Model> {
+    if percent > 100 {
+        return Err(FlagError::NotAPercentage(percent));
+    }
     let flag = require(db, key).await?;
     let mut editing: feature_flags::ActiveModel = flag.into();
-    editing.rollout_percent = ActiveValue::Set(Some(i16::from(percent.min(100))));
+    editing.rollout_percent = ActiveValue::Set(Some(i16::from(percent)));
     editing.enabled = ActiveValue::Set(true);
     editing.updated_at = ActiveValue::Set(chrono::Utc::now().into());
     Ok(editing.update(db).await?)
@@ -112,27 +122,76 @@ pub async fn clear_rollout(db: &impl ConnectionTrait, key: &str) -> Result<featu
     Ok(editing.update(db).await?)
 }
 
-/// Decide about one subject, whatever the flag says.
+/// Draw this flag's rollout from a named audience rather than from its own name.
 ///
-/// Written as delete-then-insert rather than an upsert so that the behaviour is the same on every
-/// backend sea-orm supports, and because the unique index is what actually holds the invariant.
+/// **What this is for.** Two flags at ten percent normally reach two different tenths, which is
+/// deliberate: it stops one unlucky tenth of your users meeting every experiment you run. When you
+/// want the opposite, because three switches belong to one feature and each needs its own kill
+/// switch while the audience stays put, give them all the same group.
+///
+/// Changing or clearing a group **reshuffles who is inside this flag's rollout**, because the
+/// audience is what the digest is over. Set it before the rollout starts, not during one.
 ///
 /// # Errors
 /// [`FlagError::UnknownFlag`] when no such key, or when the database will not answer.
-pub async fn set_override(
+pub async fn set_bucket_group(
     db: &impl ConnectionTrait,
+    key: &str,
+    group: Option<&str>,
+) -> Result<feature_flags::Model> {
+    let flag = require(db, key).await?;
+    let mut editing: feature_flags::ActiveModel = flag.into();
+    editing.bucket_group = ActiveValue::Set(group.map(ToOwned::to_owned));
+    editing.updated_at = ActiveValue::Set(chrono::Utc::now().into());
+    Ok(editing.update(db).await?)
+}
+
+/// Decide about one subject, whatever the flag says.
+///
+/// Written as delete-then-insert rather than an upsert so the behaviour is the same on every
+/// backend sea-orm supports, and because the unique index is what actually holds the invariant.
+///
+/// Takes anything that can begin a transaction, which includes a transaction, so a caller already
+/// inside one gets a savepoint rather than a refusal.
+///
+/// **In one transaction**, which is not a detail. Between the delete and the insert the subject has
+/// no decision at all, so a failure in the gap, or a concurrent reader arriving in it, would see
+/// them fall back to whatever the flag says. For a subject deliberately excluded from something
+/// that is sold, that gap is the feature being given away; for one deliberately included, it is
+/// being taken back. Either way it is a window nobody asked for.
+///
+/// # Errors
+/// [`FlagError::UnknownFlag`] when no such key, or when the database will not answer.
+pub async fn set_override<C: ConnectionTrait + TransactionTrait>(
+    db: &C,
     key: &str,
     scope: impl FlagScope,
     enabled: bool,
 ) -> Result<feature_flag_overrides::Model> {
-    require(db, key).await?;
+    set_override_for(db, key, scope.scope_type(), &scope.scope_id(), enabled).await
+}
 
-    let scope_type = scope.scope_type().to_owned();
-    let scope_id = scope.scope_id();
+/// [`set_override`], for a subject whose kind is only known at runtime.
+///
+/// See [`crate::Flags::load_for`] for why this exists beside the trait-shaped one.
+///
+/// # Errors
+/// [`FlagError::UnknownFlag`] when no such key, or when the database will not answer.
+pub async fn set_override_for<C: ConnectionTrait + TransactionTrait>(
+    db: &C,
+    key: &str,
+    scope_type: &str,
+    scope_id: &str,
+    enabled: bool,
+) -> Result<feature_flag_overrides::Model> {
+    let scope_type = scope_type.to_owned();
+    let scope_id = scope_id.to_owned();
 
-    clear_override_rows(db, key, &scope_type, &scope_id).await?;
+    let writing = db.begin().await?;
+    require(&writing, key).await?;
+    clear_override_rows(&writing, key, &scope_type, &scope_id).await?;
 
-    Ok(feature_flag_overrides::ActiveModel {
+    let decision = feature_flag_overrides::ActiveModel {
         id: ActiveValue::NotSet,
         flag_key: ActiveValue::Set(key.to_owned()),
         scope_type: ActiveValue::Set(scope_type),
@@ -141,22 +200,40 @@ pub async fn set_override(
         created_at: ActiveValue::NotSet,
         updated_at: ActiveValue::NotSet,
     }
-    .insert(db)
-    .await?)
+    .insert(&writing)
+    .await?;
+
+    writing.commit().await?;
+    Ok(decision)
 }
 
 /// Forget a decision about one subject, putting them back under whatever the flag says.
 ///
+/// Goes through [`require`] like every other write, so a mistyped key says so rather than reporting
+/// the honest-looking "nothing changed" that a delete of no rows would otherwise produce.
+///
 /// # Errors
-/// When the database will not answer.
+/// [`FlagError::UnknownFlag`] when no such key, or when the database will not answer.
 pub async fn clear_override(
     db: &impl ConnectionTrait,
     key: &str,
     scope: impl FlagScope,
 ) -> Result<u64> {
-    let scope_type = scope.scope_type().to_owned();
-    let scope_id = scope.scope_id();
-    clear_override_rows(db, key, &scope_type, &scope_id).await
+    clear_override_for(db, key, scope.scope_type(), &scope.scope_id()).await
+}
+
+/// [`clear_override`], for a subject whose kind is only known at runtime.
+///
+/// # Errors
+/// [`FlagError::UnknownFlag`] when no such key, or when the database will not answer.
+pub async fn clear_override_for(
+    db: &impl ConnectionTrait,
+    key: &str,
+    scope_type: &str,
+    scope_id: &str,
+) -> Result<u64> {
+    require(db, key).await?;
+    clear_override_rows(db, key, scope_type, scope_id).await
 }
 
 /// Every decision made about this flag.

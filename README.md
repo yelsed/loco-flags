@@ -56,6 +56,9 @@ cargo loco task flag:create key:paywall description:"kill switch for taking mone
 cargo loco task flag:on key:paywall
 cargo loco task flag:off key:paywall
 cargo loco task flag:rollout key:occasions pct:10
+cargo loco task flag:rollout key:occasions pct:clear
+cargo loco task flag:group key:checkout_button group:checkout
+cargo loco task flag:group key:checkout_button group:clear
 cargo loco task flag:override key:occasions scope:host:42 value:on
 cargo loco task flag:override key:occasions scope:host:42 value:clear
 cargo loco task flag:delete key:occasions
@@ -73,10 +76,44 @@ In this order, and the order is the design:
 Step 2 is what makes an operations toggle worth having at three in the morning. Off means off, not
 "off for the ninety percent who were not chosen".
 
+Two things about that are worth knowing before you need them. **`flag:rollout` switches the flag
+on**, so setting a percentage on a flag you killed during an incident brings it back; `flag:off`
+afterwards means what it says. And **a percentage rollout asked without a subject has no honest
+answer**, so `Flags::load_global` reports `RolloutWithoutScope` and answers `false` for that flag.
+If a flag is read both ways, in a request with a subject and in a worker without one, keep it off
+rollouts or give the worker a subject.
+
+## One feature is one flag
+
+Check the same name everywhere the feature shows up: in the controller, in the worker, in the
+payload the page reads. Same name, same subject, same answer, so nobody ever gets half a feature.
+
+**Do not invent a second name for a second half.** `checkout_v2_backend` and `checkout_v2_frontend`
+at ten percent each reach two *different* tenths, and a user lands in one without the other. That
+is the rollout doing exactly what it is supposed to do, applied to a mistake.
+
+## When you do want several switches on one feature
+
+Sometimes one feature really is three switches, each needing its own kill switch, but all of them
+have to reach the same people. Give them a group:
+
+```sh
+cargo loco task flag:group key:checkout_button  group:checkout
+cargo loco task flag:group key:checkout_summary group:checkout
+cargo loco task flag:group key:checkout_receipt group:checkout
+```
+
+Now all three at thirty percent reach exactly the same thirty percent, and switching one off leaves
+the other two alone. A flag with no group draws from its own name, which is the default and the
+reason two unrelated experiments never land on the same unlucky tenth of your users.
+
+Set the group **before** a rollout starts. Changing or clearing it reshuffles who is inside, because
+the audience is what the sum is over.
+
 ## The rollout is computed, not remembered
 
 ```
-bucket = first 8 bytes of sha256("{key}:{scope_type}:{scope_id}") as u64, modulo 100
+bucket = first 8 bytes of sha256(len+key, len+scope_type, len+scope_id) as u64, modulo 100
 ```
 
 Three things follow, and all three are tested:
@@ -87,6 +124,11 @@ Three things follow, and all three are tested:
   Without that, the unluckiest tenth of your users would meet every experiment you ever run.
 - **The same subject gets the same answer in every process, for ever**, with nothing stored and
   nothing to invalidate.
+
+A percentage is a fraction of everyone who asks, not a headcount. At twenty five percent, a hundred
+hosts means about twenty five; grow to a thousand and it is about two hundred and fifty, and the
+original twenty five keep it. There is no "the first fifty people", because that would need a
+counter and every process would count differently.
 
 sha256 rather than `DefaultHasher`, whose output is explicitly allowed to change between Rust
 releases. A rollout built on that would reshuffle on a toolchain bump and nothing would report it.
