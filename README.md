@@ -18,7 +18,19 @@ about it.
 
 ## Wiring it in
 
-Three lines, and no fork of loco.
+No fork of loco. Add it to your application:
+
+```sh
+cargo add loco-flags
+```
+
+And to your migration crate, because your `Migrator` names the migration below:
+
+```sh
+cargo add --manifest-path migration/Cargo.toml loco-flags
+```
+
+Then three lines:
 
 ```rust
 // src/app.rs
@@ -215,4 +227,15 @@ loco 1.1, sea-orm 2.0, Rust 1.94.
 
 ## Licence
 
-MIT or Apache-2.0, at your option.
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT licence ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+
+at your option.
+
+### Contributing
+
+Unless you state otherwise, any contribution you intentionally submit for inclusion in this crate,
+as defined in the Apache-2.0 licence, is dual licensed as above, with no additional terms.
