@@ -50,19 +50,21 @@ tables.
 
 ## Switching things
 
-```sh
-cargo loco task flag:list
-cargo loco task flag:create key:paywall description:"kill switch for taking money"
-cargo loco task flag:on key:paywall
-cargo loco task flag:off key:paywall
-cargo loco task flag:rollout key:occasions pct:10
-cargo loco task flag:rollout key:occasions pct:clear
-cargo loco task flag:group key:checkout_button group:checkout
-cargo loco task flag:group key:checkout_button group:clear
-cargo loco task flag:override key:occasions scope:host:42 value:on
-cargo loco task flag:override key:occasions scope:host:42 value:clear
-cargo loco task flag:delete key:occasions
-```
+Each of these is `cargo loco task …`:
+
+| | |
+|---|---|
+| `flag:list` | Every flag, how it is set, and who has an exception. |
+| `flag:create key:paywall description:"…"` | Make one. It arrives switched **off**. |
+| `flag:on key:paywall` | On for everybody, keeping any rollout it had. |
+| `flag:off key:paywall` | Off for everybody, whatever the rollout says. |
+| `flag:rollout key:occasions pct:10` | Reach a tenth of subjects. Also switches the flag on. |
+| `flag:rollout key:occasions pct:clear` | No percentage any more; on is the whole answer again. |
+| `flag:group key:occasions group:checkout` | Draw this flag's audience from a group. |
+| `flag:group key:occasions group:clear` | Back to drawing from its own name. |
+| `flag:override key:occasions scope:host:42 value:on` | Decide for one subject, whatever the flag says. |
+| `flag:override key:occasions scope:host:42 value:clear` | Forget that decision. |
+| `flag:delete key:occasions` | Delete it, and every exception on it. |
 
 ## How an answer is reached
 
