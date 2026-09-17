@@ -221,6 +221,12 @@ Seams, not oversights:
 - **Booleans only.** No variants, so no three-way test.
 - **No admin screen.** Tasks first. A button sits on the same `store` functions these do.
 
+## The design
+
+[`docs/DESIGN.md`](docs/DESIGN.md) is the whole design with its reasoning: why two tables rather
+than three, why the bucket is computed rather than stored, what was considered and rejected, and
+what version 1 leaves out on purpose.
+
 ## Requires
 
 loco 1.1, sea-orm 2.0, Rust 1.94.
