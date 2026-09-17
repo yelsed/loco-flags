@@ -227,15 +227,6 @@ loco 1.1, sea-orm 2.0, Rust 1.94.
 
 ## Licence
 
-Licensed under either of
+MIT. See [LICENSE](LICENSE).
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
-  <https://www.apache.org/licenses/LICENSE-2.0>)
-- MIT licence ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
-
-at your option.
-
-### Contributing
-
-Unless you state otherwise, any contribution you intentionally submit for inclusion in this crate,
-as defined in the Apache-2.0 licence, is dual licensed as above, with no additional terms.
+Do what you like with it, keep the copyright line, and there is no warranty.
