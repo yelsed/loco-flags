@@ -1,11 +1,11 @@
 //! One human decision about one subject.
 //!
-//! **Not a cache.** Pennant has a table shaped a little like this one and it holds *resolved
-//! values*, because a PHP closure can answer differently on every call and its answers therefore
-//! have to be frozen. There are no closures here, so the rollout is recomputed every time and
-//! agrees with itself for ever. What is left in this table is only the thing that cannot be
-//! computed: somebody deciding that this particular subject is in or out, whatever the rollout
-//! says.
+//! **Not a cache**, which is the distinction the whole design rests on. A table shaped like this
+//! one usually holds resolved answers, because a flag defined as a rule in code can answer
+//! differently on every call and its answers therefore have to be frozen. Here the rollout is
+//! arithmetic, recomputed every time and identical for ever, so there is nothing worth freezing.
+//! What is left is only the thing that cannot be computed: somebody deciding that this particular
+//! subject is in or out, whatever the rollout says.
 //!
 //! That distinction is why nothing ever needs to purge this table.
 

@@ -57,10 +57,11 @@
 //!
 //! # What this is not
 //!
-//! Not [Pennant](https://laravel.com/docs/pennant). Pennant lets you define a flag as a closure and
-//! therefore has to store every resolved answer, because a closure can answer differently on every
-//! call. There are no closures here, so the answer is computed rather than remembered: one table
-//! fewer, no purge task, and a read that is not secretly a write.
+//! **Two tables, not three, and no way to define a flag as a rule in code.** Those are the same
+//! decision. A rule can answer differently on every call, so its answers have to be frozen the
+//! moment they are first given, and that store then needs invalidating and purging. Here the answer
+//! is arithmetic over the flag and the subject, recomputed every time and identical for ever, so
+//! there is nothing to store and a read is not secretly a write.
 //!
 //! And deliberately, in this version: no process-wide cache, so two queries per request; flag names
 //! are strings, so a typo is a warning in the log rather than a compile error; booleans only, so no

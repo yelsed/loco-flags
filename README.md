@@ -187,12 +187,16 @@ counter and every process would count differently.
 sha256 rather than `DefaultHasher`, whose output is explicitly allowed to change between Rust
 releases. A rollout built on that would reshuffle on a toolchain bump and nothing would report it.
 
-## Not Pennant
+## Two tables, not three
 
-[Pennant](https://laravel.com/docs/pennant) is the model, not the target. Pennant lets you define a
-flag as a closure, and therefore has to store every resolved answer, because a closure can answer
-differently on every call. There are no closures here, so the answer is computed rather than
-remembered: one table fewer, no purge task, and a read that is not secretly a write.
+A flag's definition, and the exceptions people wrote about particular subjects. There is no third
+table holding resolved answers, and there is deliberately no way to define a flag as a rule in code.
+
+Those two facts are the same fact. A rule written in code can answer differently on every call, so
+its answers have to be frozen somewhere the moment they are first given, and that store then needs
+invalidating, purging and reasoning about. Here the answer is arithmetic over the flag and the
+subject, so it is recomputed every time and agrees with itself for ever. Nothing to store, nothing
+to purge, and a read that is not secretly a write.
 
 ## What version 1 deliberately leaves out
 

@@ -48,11 +48,11 @@ crates.io holds exactly five `loco-*` crates (`loco-rs`, `loco-gen`, `loco-cli`,
 `loco-openapi`, `loco-oauth2`) and a GitHub search for loco feature flags returns zero
 repositories. Rust as a whole has client SDKs for hosted services (LaunchDarkly, Unleash,
 Flagsmith, ConfigCat, GrowthBook, FeatBit) and bare evaluation libraries (`open-feature`,
-`liteflags-rs`), and no framework-integrated equivalent of Laravel Pennant for any Rust
-framework. Loco's own "feature flags" are Cargo features, which are compile-time.
+`liteflags-rs`), and nothing that a web framework carries as part of itself. Loco's own
+"feature flags" are Cargo features, which are compile-time.
 
-Pennant is the model. This is not a port of it: the differences below are deliberate and
-each one is written down with its reason.
+Every decision below is written down with its reason, including the ones that were
+considered and rejected.
 
 ## What a flag is here
 
@@ -60,14 +60,16 @@ The database is the truth. Code knows a flag's name and nothing else. Turning on
 or up to a percentage is a task or, later, a button, and never a deploy.
 
 There are no rules in code, no closures, no definition step. That is the single largest
-departure from Pennant and it is what keeps version 1 small.
+decision in this design and it is what keeps version 1 small.
 
 ## Data model
 
-Two tables. Pennant has a third, holding the resolved value per scope, because a PHP
-closure can answer differently on every call and its answers must be frozen. Without
-closures the answer is computable, so it is computed rather than remembered. That removes
-a table, removes the purge task it would need, and keeps a read from being a write.
+Two tables, where the obvious design has three. The third would hold a resolved value per
+scope, and it is only needed when a flag can be defined as a rule in code: such a rule may
+answer differently on every call, so its answers have to be frozen the moment they are
+first given. Without rules the answer is computable, so it is computed rather than
+remembered. That removes a table, removes the purge task it would need, and keeps a read
+from being a write.
 
 ```
 feature_flags
