@@ -50,21 +50,73 @@ tables.
 
 ## Switching things
 
-Each of these is `cargo loco task …`:
+One command per block, so copying one gives you one. There is an eighth, `flag:group`, under
+[when you do want several switches on one feature](#when-you-do-want-several-switches-on-one-feature).
 
-| | |
-|---|---|
-| `flag:list` | Every flag, how it is set, and who has an exception. |
-| `flag:create key:paywall description:"…"` | Make one. It arrives switched **off**. |
-| `flag:on key:paywall` | On for everybody, keeping any rollout it had. |
-| `flag:off key:paywall` | Off for everybody, whatever the rollout says. |
-| `flag:rollout key:occasions pct:10` | Reach a tenth of subjects. Also switches the flag on. |
-| `flag:rollout key:occasions pct:clear` | No percentage any more; on is the whole answer again. |
-| `flag:group key:occasions group:checkout` | Draw this flag's audience from a group. |
-| `flag:group key:occasions group:clear` | Back to drawing from its own name. |
-| `flag:override key:occasions scope:host:42 value:on` | Decide for one subject, whatever the flag says. |
-| `flag:override key:occasions scope:host:42 value:clear` | Forget that decision. |
-| `flag:delete key:occasions` | Delete it, and every exception on it. |
+### Look at what is there
+
+```sh
+cargo loco task flag:list
+```
+
+### Make one
+
+It arrives switched **off**, always. A flag that could be born on would make adding one a release.
+
+```sh
+cargo loco task flag:create key:paywall description:"kill switch for taking money"
+```
+
+### On and off
+
+`flag:on` keeps any rollout the flag had, so switching off during an incident and back on
+afterwards returns it to the rollout rather than to everybody at once.
+
+```sh
+cargo loco task flag:on key:paywall
+```
+
+`flag:off` beats a rollout: off means off, not off for the ninety percent who were not chosen.
+
+```sh
+cargo loco task flag:off key:paywall
+```
+
+### A percentage
+
+This **also switches the flag on**, because a rollout on a killed flag reaches nobody.
+
+```sh
+cargo loco task flag:rollout key:occasions pct:10
+```
+
+Take the percentage away again, so being on is the whole answer:
+
+```sh
+cargo loco task flag:rollout key:occasions pct:clear
+```
+
+### One subject at a time
+
+A decision about one host, party or tenant, which beats everything the flag says.
+
+```sh
+cargo loco task flag:override key:occasions scope:host:42 value:on
+```
+
+Withdraw it, and that subject goes back under the flag:
+
+```sh
+cargo loco task flag:override key:occasions scope:host:42 value:clear
+```
+
+### Delete it
+
+Every exception on it goes too.
+
+```sh
+cargo loco task flag:delete key:occasions
+```
 
 ## How an answer is reached
 
