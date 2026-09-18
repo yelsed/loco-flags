@@ -1,16 +1,13 @@
 # The design of loco-flags
 
 Runtime feature flags for [loco.rs](https://loco.rs), kept in the database. This document is the
-design of the whole crate and it describes what is built, not what was once planned. It is kept
-alive in the same change as the code.
+design of the crate: what it does, how it reaches an answer, and why each decision was taken,
+including the alternatives that were rejected. It is kept alive in the same change as the code.
 
-**Where a decision lives.** The hard decisions are in this document, each with the reason it was
-taken and the alternatives that were rejected. A decision that outgrows a paragraph gets its own
-file in [`decisions/`](decisions/), numbered and dated, and this document links to it from the
-section it belongs to. Nothing is decided in a commit message or in a pull request thread alone.
-
-**What changed and when** is at the bottom, under [History](#history), so the body of the document
-can describe the crate rather than its own past.
+**Where a decision lives.** In this document, in the section it belongs to. A decision gets its own
+file in [`decisions/`](decisions/) when it outgrows a paragraph here: when the alternatives need
+arguing out, when it will be re-litigated, or when it is superseded later and both versions have to
+stay readable. Nothing is decided in a commit message or in a pull request thread alone.
 
 ## Why this exists
 
@@ -32,11 +29,11 @@ this design and it is what keeps version 1 small.
 
 ## Data model
 
-Two tables, where the obvious design has three. The third would hold a resolved value per subject,
-and it is only needed when a flag can be defined as a rule in code: such a rule may answer
-differently on every call, so its answers have to be frozen the moment they are first given. Without
-rules the answer is computable, so it is computed rather than remembered. That removes a table,
-removes the purge task it would need, and keeps a read from being a write.
+Two tables. The obvious design has three, and the third holds a resolved answer per subject. That
+table is only needed when a flag can be a rule in code: a rule may answer differently on every call,
+so its answers have to be frozen the first time they are given, and then invalidated, purged and
+reasoned about. There are no rules here, so an answer is arithmetic over the flag and the subject.
+It is recomputed on every read, it agrees with itself for ever, and a read is not secretly a write.
 
 ```
 feature_flags
@@ -57,15 +54,16 @@ feature_flag_overrides
 
 An override row is an explicit human decision about one subject, not a cached answer.
 
-**The migration refuses a database that already has a `feature_flags` table**, rather than adopting
-it with `if_not_exists`. Adoption reads as politeness and is data loss waiting to happen: a table
-with the same name and a different shape would be silently accepted, and `down` would then drop a
-table this crate never created. Refusing names the collision while it is still cheap to rename one
-of the two.
+**The migration refuses a database that already has a `feature_flags` table.** The polite
+alternative is `if_not_exists`, and it is the dangerous one. It skips the table that is already
+there, creates everything around it, and records itself as applied. Every request then fails on
+`column feature_flags.enabled does not exist`, with nothing pointing back at the cause, and `down`
+would drop a table this crate never created. Refusing names the collision while renaming one of the
+two tables is still cheap.
 
-**Both index names carry their table**, because a Postgres index name is schema-wide while a table
-name is not. `idx_key` from two crates in one database is a migration that fails on somebody else's
-deployment and not on ours.
+**Both index names carry their table.** A Postgres index name is schema-wide, so two crates that
+each create an index called `idx_key` cannot share a database. The second migration to run is the
+one that fails, which means it fails on somebody else's deployment and never on ours.
 
 ## Resolution, in one function
 
@@ -81,11 +79,10 @@ ninety percent who were not chosen".
 
 The audience in step 4 is `bucket_group` when the flag has one and the flag's own key when it does
 not. Two flags at ten percent therefore reach two different tenths by default, which is what stops
-one unlucky tenth of an application's users meeting every experiment it ever runs. A group is the
-way to ask for the opposite, and it exists for the case the first draft had no answer for: one
-feature that is genuinely three switches, each wanting its own kill switch, all of which have to
-reach the same people. Without it the only way to keep three switches in step was to make them one
-flag, which costs the ability to kill them one at a time.
+one unlucky tenth of an application's users meeting every experiment it ever runs. A group is how to
+ask for the opposite, for the feature that is genuinely three switches: each wants its own kill
+switch, and all three have to reach the same people. Without a group the only way to keep them in
+step is to make them one flag, which costs the ability to kill them one at a time.
 
 A rollout percentage asked without a subject is refused with a typed error rather than computed.
 "Twenty five percent of requests" makes the answer flicker under one reader, which is not what
@@ -97,10 +94,10 @@ anybody means by a rollout.
 bucket = first 8 bytes of sha256(len+audience, len+scope_type, len+scope_id) as u64, modulo 100
 ```
 
-**Each part is length-prefixed rather than joined with a separator.** Joining on `:` was ambiguous:
-`("occasions", "host", "7:9")` and `("occasions", "host:7", "9")` produced the same digest and
-therefore the same bucket, and an application whose identifiers contain colons, which a urn or a
-prefixed uuid does, would have had two different subjects sharing one answer.
+**Each part is length-prefixed rather than joined with a separator.** Joining on `:` is ambiguous:
+`("occasions", "host", "7:9")` and `("occasions", "host:7", "9")` produce one digest and therefore
+one bucket, so an application whose identifiers contain colons, which a urn or a prefixed uuid does,
+would have two different subjects sharing one answer.
 
 Sha2 is already in loco's dependency tree, so this adds no dependency. It is used rather than
 `std::collections::hash_map::DefaultHasher` because that one carries no stability guarantee across
@@ -144,12 +141,12 @@ impl FlagScope for Host {
 }
 ```
 
-**`scope_type` returns `&'static str` and not `&str`**, which was tried and reverted. A consumer
-implements this with a literal, and clippy's `unnecessary_literal_bound` fires on every such
+**`scope_type` returns `&'static str`, and a borrowed `&str` was rejected.** A consumer implements
+this method with a literal, and clippy's `unnecessary_literal_bound` fires on every such
 implementation when the trait returns a borrowed `&str`. Pushing a lint into everybody else's crate
-to save one lifetime is the wrong trade, so the runtime-shaped calls, `load_for` and the `_for`
-functions in `store`, take the pair of strings directly instead. `Subject::new(kind, id)` names a
-subject without a type to hang the trait on.
+to save one lifetime here is the wrong trade. A kind chosen at runtime never touches the trait: it
+goes to `load_for` and to the `_for` functions in `store`, which take the pair of strings directly,
+and `Subject::new(kind, id)` names a subject with no type to hang the trait on.
 
 No application's type appears in this crate, and no type from this crate appears in an application's
 tables. It is meant to be published.
@@ -181,19 +178,19 @@ Three of those writes carry a rule worth stating here:
   setting a percentage is nobody's way of saying "still off". A flag killed during an incident
   therefore comes back when somebody sets a percentage on it, and `flag:off` afterwards means what
   it says.
-- **`flag:rollout … pct:clear` exists** because a rollout was otherwise a one-way door: `flag:on`
-  keeps it, `flag:off` answers false without removing it, and only `flag:delete` cleared it, by
-  deleting the flag and cascading away every exception anybody had written.
+- **`flag:rollout … pct:clear` is the way back off a rollout.** Without it a percentage is a one-way
+  door: `flag:on` keeps it, `flag:off` answers false without removing it, and the only other way out
+  is deleting the flag, which cascades away every exception anybody wrote.
 
-**A percentage above a hundred is refused and never clamped.** Clamping turned a mistyped `1000`
-into "release it to everybody", quietly, and it disagreed with the task, which refused the same
-number. Two ways in with opposite answers, and the quiet one was the dangerous one.
+**A percentage above a hundred is refused and never clamped.** Clamping turns a mistyped `1000` into
+"release it to everybody", quietly, and it disagrees with the task, which refuses the same number.
+Two ways in with opposite answers, and the quiet one is the dangerous one.
 
 **`set_override` runs in a transaction.** It is written as delete-then-insert rather than an upsert,
 so the behaviour is the same on every backend sea-orm supports and the unique index stays the thing
 that holds the invariant. Between the delete and the insert the subject has no decision at all, so a
-failure in that gap, or a reader arriving in it, would fall back to whatever the flag says. For a
-subject deliberately excluded from something that is sold, that gap is the feature being given away.
+failure in that gap, or a reader arriving in it, falls back to whatever the flag says. For a subject
+deliberately excluded from something that is sold, that gap is the feature being given away.
 
 **Every write goes through `require`**, so `flag:on key:typo` says no flag is called `typo` and
 changes nothing. Creating what was asked for would turn a misspelling into a second flag that the
@@ -201,9 +198,7 @@ code never asks about and nobody ever finds.
 
 ## Wiring it into an application
 
-Three lines, and no fork of loco. `AppContext.shared_store` exists for exactly this, and
-`AppContext`, `Initializer` and `Task` are word for word identical between 0.16.4 and 1.1.0, so the
-seams are stable across that upgrade.
+Three lines, and no fork of loco. `AppContext.shared_store` exists for exactly this.
 
 ```rust
 fn initializers(..) -> Vec<Box<dyn Initializer>> { vec![Box::new(loco_flags::Initializer)] }
@@ -213,8 +208,8 @@ Box::new(loco_flags::migrations::CreateFeatureFlags),
 ```
 
 **The migration is named by hand rather than by `DeriveMigrationName`.** That derive takes its name
-from the module path, so it would have written this crate's path into a consumer's migration
-history, and the recorded name would change whenever this crate moved a module.
+from the module path, so it would write this crate's path into a consumer's migration history, and
+the recorded name would change whenever this crate moved a module.
 
 ## Errors
 
@@ -255,9 +250,9 @@ The tests that matter are about the bucket: that ten thousand subjects land with
 requested percentage, that raising the percentage never moves anybody out, that two flags at the
 same percentage reach different people, and that two flags sharing a group reach the same people.
 
-**Each test connects with a pool of two.** sea-orm's default is a hundred per pool, and one test
-file opening a pool per test exhausted Postgres and took the container down with it. A test that
-needs a second connection needs it for a transaction, not for throughput.
+**Each test connects with a pool of two.** sea-orm's default is a hundred connections per pool, and
+a file that opens one pool per test exhausts Postgres and takes the container down with it. A test
+that needs a second connection needs it for a transaction, not for throughput.
 
 ## Deliberately not in version 1
 
@@ -273,35 +268,6 @@ later session must not quietly close them off.
 - **No admin screen.** Tasks first. A button in an application's own panel sits on the same `store`
   functions the tasks do.
 
-## Target versions
+## Requires
 
-loco 1.1, sea-orm 2.0, Rust 1.94. Building against 0.16 was considered and rejected: a crate
-published in late 2026 that only supports a version from October 2025 starts with debt, and Fuyf has
-to make that jump anyway.
-
-## History
-
-**14 September 2026, the design.** Written before any code, as the document this one grew out of.
-The shape it settled on, two tables, no rules in code, a computed bucket, is the shape that was
-built.
-
-**15 September 2026, the build.** Six things arrived that the design had not named, all of them
-additive: `load_on` and `load_global_on` for a caller with no `AppContext`; `try_active`, so the
-typed errors are reachable and not only loggable; `Subject`, for a caller with no type to hang
-`FlagScope` on; `store`, so every write is in one place; the hand-written migration name; and
-`flag:override … value:clear`.
-
-**15 September 2026, the code review.** Eight changes, and two of them were data-loss class: the
-migration adopting a table it did not create, and `down` then dropping it. The rest: the
-length-prefixed digest, the `CHECK` on `rollout_percent` and the defensive read beside it,
-`pct:clear`, `FlagScope::scope_type` briefly returning `&str` and being reverted, `FlagError`
-becoming `#[non_exhaustive]` and gaining `NotAPercentage`, `set_override` gaining its transaction
-and `clear_override` gaining the key check, and the two index names gaining their table.
-
-**15 September 2026, the shared audience.** `bucket_group` and `flag:group`, asked for by the owner
-after reading how the bucket works, for the feature that is genuinely three switches.
-
-**17 September 2026, this document.** Renamed from `0001-design.md`, which read as the first of a
-numbered series when it is the one global design, and rewritten to describe the crate rather than
-the distance between the crate and its first draft. `decisions/` is where a decision goes that
-outgrows a paragraph here.
+loco 1.1, sea-orm 2.0, Rust 1.94.
