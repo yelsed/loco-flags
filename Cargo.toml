@@ -1,0 +1,49 @@
+[package]
+name = "loco-flags"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+description = "Runtime feature flags for loco.rs, kept in the database and switched without a deploy"
+license = "MIT"
+repository = "https://github.com/yelsed/loco-flags"
+documentation = "https://docs.rs/loco-flags"
+readme = "README.md"
+keywords = ["loco", "feature-flags", "rollout", "web", "sea-orm"]
+categories = ["web-programming", "config", "database"]
+
+[dependencies]
+# The framework this bolts onto. No fork: `Initializer`, `Task` and `AppContext.shared_store` are
+# all the seams this needs, and all three are public.
+# `with-db` is the one feature this needs: it is what puts `db` on `AppContext` and the `DB`
+# variant on loco's error. Everything else loco can do is the consumer's business, so `cli`,
+# `auth`, the caches and the workers are all left off here and arrive through their own dependency.
+loco-rs = { version = "1.1", default-features = false, features = ["with-db"] }
+
+# Only the derive macros are asked for here. That is not the same as leaving the driver to the
+# consumer: enabling loco's `with-db` above pulls in loco's own sea-orm, which already names
+# `sqlx-postgres`, `sqlx-sqlite` and `runtime-tokio-rustls`, and cargo unions features across the
+# graph. So the drivers arrive either way. Naming none of them here keeps this manifest honest
+# about what it is choosing, which is nothing, and means the day loco changes its mind this crate
+# does not have to be edited.
+sea-orm = { version = "2.0", default-features = false, features = ["macros"] }
+sea-orm-migration = { version = "2.0", default-features = false }
+
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+# Already in loco's own tree, so this adds nothing a consumer was not already compiling.
+sha2 = "0.10"
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+async-trait = "0.1"
+# `testing` is what exposes `tests_cfg`, which is the only way to build an `AppContext` from
+# outside loco: it is `#[non_exhaustive]`, so a struct literal will not do. The tests take the one
+# it hands out and swap its dummy connection for a real one.
+loco-rs = { version = "1.1", default-features = false, features = ["with-db", "testing"] }
+# The integration tests own a connection and a migrator directly, with no application around them,
+# so they need the driver and runtime a consumer's loco would otherwise be supplying.
+sea-orm = { version = "2.0", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros"] }
+sea-orm-migration = { version = "2.0", features = ["sqlx-postgres", "runtime-tokio-rustls"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
